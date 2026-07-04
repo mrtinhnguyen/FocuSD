@@ -56,6 +56,16 @@ type IslandSettings = {
   opacity: number;
   sizeScale: number;
   marginY: number;
+  temporaryHideSeconds: number;
+  taskTitleColor: string;
+  islandBackgroundColor: string;
+};
+
+type IslandPreset = {
+  id: string;
+  name: string;
+  settings: IslandSettings;
+  createdAt: number;
 };
 
 type IslandShellProps = {
@@ -63,6 +73,7 @@ type IslandShellProps = {
   editor: EditorMode;
   activeTaskTitle: string | null;
   pendingTodoCount: number;
+  temporaryHideSeconds: number;
   onToggle: () => void;
   onCollapse: () => void;
   onMinimize: () => void;
@@ -72,6 +83,7 @@ type IslandShellProps = {
 };
 
 const STORAGE_KEY = "focusd-island-settings";
+const SETTINGS_PRESETS_STORAGE_KEY = "focusd-island-setting-presets";
 const TODOS_STORAGE_KEY = "focusd-island-todos";
 const ACTIVE_TODO_STORAGE_KEY = "focusd-island-active-todo";
 const TODO_DATE_STORAGE_KEY = "focusd-island-current-date";
@@ -80,20 +92,72 @@ const TODO_SAVE_DIRECTORY_STORAGE_KEY = "focusd-island-save-directory";
 const TODO_LAST_SAVED_SIGNATURE_STORAGE_KEY =
   "focusd-island-last-saved-signature";
 const BASE_EXPANDED_ISLAND_HEIGHT = 306;
-const EDITOR_EXPANDED_ISLAND_HEIGHT = 340;
+const EDITOR_EXPANDED_ISLAND_HEIGHT = 430;
 const TODO_ROW_HEIGHT = 46;
 const TODO_TITLE_CHARACTERS_PER_LINE = 32;
 const TODO_MAX_ESTIMATED_TITLE_LINES = 5;
 const TODO_GROW_START_ROWS = 2;
 const TODO_SCROLL_START_ROWS = 6;
+const MAX_SETTING_PRESETS = 6;
 const DEFAULT_SETTINGS: IslandSettings = {
   opacity: 100,
   sizeScale: 1,
   marginY: 12,
+  temporaryHideSeconds: 5,
+  taskTitleColor: "#66ffb8",
+  islandBackgroundColor: "#101013",
 };
 
 const clamp = (value: number, min: number, max: number) =>
   Math.min(Math.max(value, min), max);
+
+const HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
+
+function getColorSetting(value: unknown, fallback: string) {
+  return typeof value === "string" && HEX_COLOR_PATTERN.test(value)
+    ? value
+    : fallback;
+}
+
+function getSecondsSetting(value: unknown, fallback: number) {
+  const parsed = Number(value);
+
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return clamp(Math.round(parsed), 1, 60);
+}
+
+function normalizeSettings(
+  settings: (Partial<IslandSettings> & { margin?: number }) | null | undefined,
+): IslandSettings {
+  return {
+    opacity: clamp(Number(settings?.opacity ?? DEFAULT_SETTINGS.opacity), 50, 100),
+    sizeScale: clamp(
+      Number(settings?.sizeScale ?? DEFAULT_SETTINGS.sizeScale),
+      0.75,
+      1.4,
+    ),
+    marginY: clamp(
+      Number(settings?.marginY ?? settings?.margin ?? DEFAULT_SETTINGS.marginY),
+      0,
+      160,
+    ),
+    temporaryHideSeconds: getSecondsSetting(
+      settings?.temporaryHideSeconds,
+      DEFAULT_SETTINGS.temporaryHideSeconds,
+    ),
+    taskTitleColor: getColorSetting(
+      settings?.taskTitleColor,
+      DEFAULT_SETTINGS.taskTitleColor,
+    ),
+    islandBackgroundColor: getColorSetting(
+      settings?.islandBackgroundColor,
+      DEFAULT_SETTINGS.islandBackgroundColor,
+    ),
+  };
+}
 
 function getTodoTitleLineCount(title: string) {
   const visualLength = Array.from(title).reduce(
@@ -127,21 +191,43 @@ function loadSettings(): IslandSettings {
       margin?: number;
     };
 
-    return {
-      opacity: clamp(Number(parsed.opacity ?? DEFAULT_SETTINGS.opacity), 50, 100),
-      sizeScale: clamp(
-        Number(parsed.sizeScale ?? DEFAULT_SETTINGS.sizeScale),
-        0.75,
-        1.4,
-      ),
-      marginY: clamp(
-        Number(parsed.marginY ?? parsed.margin ?? DEFAULT_SETTINGS.marginY),
-        0,
-        160,
-      ),
-    };
+    return normalizeSettings(parsed);
   } catch {
     return DEFAULT_SETTINGS;
+  }
+}
+
+function loadSettingPresets(): IslandPreset[] {
+  const stored = window.localStorage.getItem(SETTINGS_PRESETS_STORAGE_KEY);
+
+  if (!stored) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(stored) as Partial<IslandPreset>[];
+
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed
+      .map((preset, index) => ({
+        id:
+          typeof preset.id === "string" && preset.id
+            ? preset.id
+            : createTodoId(),
+        name:
+          typeof preset.name === "string" && preset.name.trim()
+            ? preset.name.trim()
+            : `预设 ${index + 1}`,
+        settings: normalizeSettings(preset.settings),
+        createdAt:
+          typeof preset.createdAt === "number" ? preset.createdAt : Date.now(),
+      }))
+      .slice(0, MAX_SETTING_PRESETS);
+  } catch {
+    return [];
   }
 }
 
@@ -272,6 +358,7 @@ function IslandShell({
   editor,
   activeTaskTitle,
   pendingTodoCount,
+  temporaryHideSeconds,
   onToggle,
   onCollapse,
   onMinimize,
@@ -312,8 +399,8 @@ function IslandShell({
         <button
           className="island__quiet-button"
           type="button"
-          title="暂时隐藏 5 秒"
-          aria-label="暂时隐藏岛屿 5 秒"
+          title={`暂时隐藏 ${temporaryHideSeconds} 秒`}
+          aria-label={`暂时隐藏岛屿 ${temporaryHideSeconds} 秒`}
           onClick={(event) => {
             event.stopPropagation();
             onTemporarilyHide();
@@ -434,23 +521,174 @@ function SliderControl({
   );
 }
 
+function ColorControl({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="color-control">
+      <span className="color-control__meta">
+        <span>{label}</span>
+        <strong>{value.toUpperCase()}</strong>
+      </span>
+      <input
+        type="color"
+        value={value}
+        aria-label={label}
+        onChange={(event) => onChange(event.currentTarget.value)}
+      />
+    </label>
+  );
+}
+
+function NumberControl({
+  label,
+  value,
+  min,
+  max,
+  suffix,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  suffix: string;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="number-control">
+      <span className="number-control__meta">
+        <span>{label}</span>
+        <strong>
+          {value}
+          {suffix}
+        </strong>
+      </span>
+      <span className="number-control__field">
+        <input
+          type="number"
+          min={min}
+          max={max}
+          step={1}
+          value={value}
+          onChange={(event) => {
+            const nextValue = Number(event.currentTarget.value);
+
+            if (!Number.isFinite(nextValue)) {
+              return;
+            }
+
+            onChange(clamp(Math.round(nextValue), min, max));
+          }}
+        />
+        <span>{suffix}</span>
+      </span>
+    </label>
+  );
+}
+
+function ToggleControl({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="toggle-control">
+      <span>{label}</span>
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.currentTarget.checked)}
+      />
+      <span className="toggle-control__switch" aria-hidden="true" />
+    </label>
+  );
+}
+
 function LayoutEditor({
   settings,
   saveDirectoryDraft,
   savePathState,
+  highlightSavePath,
+  presets,
+  launchAtStartup,
   onSettingsChange,
   onReset,
   onSaveDirectoryDraftChange,
   onSaveDirectory,
+  onSavePreset,
+  onApplyPreset,
+  onRenamePreset,
+  onDeletePreset,
+  onLaunchAtStartupChange,
 }: {
   settings: IslandSettings;
   saveDirectoryDraft: string;
   savePathState: SavePathState;
+  highlightSavePath: boolean;
+  presets: IslandPreset[];
+  launchAtStartup: boolean;
   onSettingsChange: (settings: IslandSettings) => void;
   onReset: () => void;
   onSaveDirectoryDraftChange: (value: string) => void;
   onSaveDirectory: () => void;
+  onSavePreset: () => void;
+  onApplyPreset: (presetId: string) => void;
+  onRenamePreset: (presetId: string, name: string) => void;
+  onDeletePreset: (presetId: string) => void;
+  onLaunchAtStartupChange: (enabled: boolean) => void;
 }) {
+  const savePathPanelRef = useRef<HTMLDivElement | null>(null);
+  const savePathInputRef = useRef<HTMLInputElement | null>(null);
+  const [editingPresetId, setEditingPresetId] = useState<string | null>(null);
+  const [presetNameDraft, setPresetNameDraft] = useState("");
+
+  const startPresetRename = useCallback((preset: IslandPreset) => {
+    setEditingPresetId(preset.id);
+    setPresetNameDraft(preset.name);
+  }, []);
+
+  const commitPresetRename = useCallback(() => {
+    if (!editingPresetId) {
+      return;
+    }
+
+    onRenamePreset(editingPresetId, presetNameDraft);
+    setEditingPresetId(null);
+    setPresetNameDraft("");
+  }, [editingPresetId, onRenamePreset, presetNameDraft]);
+
+  useEffect(() => {
+    if (!highlightSavePath) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      const editorPanel = savePathPanelRef.current?.closest(".editor-panel");
+
+      if (editorPanel instanceof HTMLElement) {
+        editorPanel.scrollTo({
+          top: editorPanel.scrollHeight,
+          behavior: "smooth",
+        });
+      }
+
+      savePathInputRef.current?.focus({ preventScroll: true });
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [highlightSavePath]);
+
   return (
     <div className="editor-panel">
       <div className="editor-panel__header">
@@ -492,8 +730,124 @@ function LayoutEditor({
         suffix="px"
         onChange={(marginY) => onSettingsChange({ ...settings, marginY })}
       />
+      <NumberControl
+        label="暂隐时长"
+        value={settings.temporaryHideSeconds}
+        min={1}
+        max={60}
+        suffix="s"
+        onChange={(temporaryHideSeconds) =>
+          onSettingsChange({ ...settings, temporaryHideSeconds })
+        }
+      />
+      <ToggleControl
+        label="开机自启动"
+        checked={launchAtStartup}
+        onChange={onLaunchAtStartupChange}
+      />
 
-      <div className="save-path-panel">
+      <div className="color-panel">
+        <div className="color-panel__header">
+          <span>颜色设置</span>
+        </div>
+        <div className="color-grid">
+          <ColorControl
+            label="任务名颜色"
+            value={settings.taskTitleColor}
+            onChange={(taskTitleColor) =>
+              onSettingsChange({ ...settings, taskTitleColor })
+            }
+          />
+          <ColorControl
+            label="岛屿背景"
+            value={settings.islandBackgroundColor}
+            onChange={(islandBackgroundColor) =>
+              onSettingsChange({ ...settings, islandBackgroundColor })
+            }
+          />
+        </div>
+      </div>
+
+      <div className="preset-panel">
+        <div className="preset-panel__header">
+          <span>预设</span>
+          <button
+            className="preset-save-button"
+            type="button"
+            onClick={onSavePreset}
+          >
+            <Save size={13} strokeWidth={2.2} />
+            <span>保存当前</span>
+          </button>
+        </div>
+        {presets.length === 0 ? (
+          <div className="preset-empty">还没有预设</div>
+        ) : (
+          <div className="preset-list" role="list">
+            {presets.map((preset) => (
+              <div className="preset-item" key={preset.id} role="listitem">
+                {editingPresetId === preset.id ? (
+                  <input
+                    className="preset-name-input"
+                    value={presetNameDraft}
+                    aria-label="预设名称"
+                    autoFocus
+                    onChange={(event) =>
+                      setPresetNameDraft(event.currentTarget.value)
+                    }
+                    onBlur={commitPresetRename}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        commitPresetRename();
+                      }
+
+                      if (event.key === "Escape") {
+                        setEditingPresetId(null);
+                        setPresetNameDraft("");
+                      }
+                    }}
+                  />
+                ) : (
+                  <button
+                    className="preset-name-button"
+                    type="button"
+                    title="重命名预设"
+                    onClick={() => startPresetRename(preset)}
+                  >
+                    {preset.name}
+                  </button>
+                )}
+                <button
+                  className="preset-apply-button"
+                  type="button"
+                  onClick={() => onApplyPreset(preset.id)}
+                >
+                  启用
+                </button>
+                <button
+                  className="preset-delete-button"
+                  type="button"
+                  title="删除预设"
+                  aria-label={`删除 ${preset.name}`}
+                  onClick={() => onDeletePreset(preset.id)}
+                >
+                  <Trash2 size={13} strokeWidth={2.2} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div
+        className={[
+          "save-path-panel",
+          highlightSavePath ? "save-path-panel--attention" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+        ref={savePathPanelRef}
+      >
         <div className="save-path-panel__header">
           <span>待办清单保存路径</span>
         </div>
@@ -501,6 +855,7 @@ function LayoutEditor({
           <label className="save-path-field">
             <span>文件夹</span>
             <input
+              ref={savePathInputRef}
               value={saveDirectoryDraft}
               placeholder="D:/Todos"
               aria-label="待办清单 Markdown 保存文件夹"
@@ -550,6 +905,7 @@ function TodoNotebook({
   onDraftChange,
   onAddTodo,
   onToggleTodo,
+  onUpdateTodo,
   onStartTodo,
   onDeleteTodo,
   onSaveToday,
@@ -570,6 +926,7 @@ function TodoNotebook({
   onDraftChange: (value: string) => void;
   onAddTodo: () => void;
   onToggleTodo: (id: string) => void;
+  onUpdateTodo: (id: string, title: string) => void;
   onStartTodo: (id: string) => void;
   onDeleteTodo: (id: string) => void;
   onSaveToday: () => void;
@@ -601,6 +958,32 @@ function TodoNotebook({
   ]
     .filter(Boolean)
     .join(" ");
+  const [editingTodoId, setEditingTodoId] = useState<string | null>(null);
+  const [todoTitleDraft, setTodoTitleDraft] = useState("");
+
+  const startTodoTitleEdit = useCallback((todo: TodoItem) => {
+    if (!isTodayMode) {
+      return;
+    }
+
+    setEditingTodoId(todo.id);
+    setTodoTitleDraft(todo.title);
+  }, [isTodayMode]);
+
+  const commitTodoTitleEdit = useCallback(() => {
+    if (!editingTodoId) {
+      return;
+    }
+
+    const nextTitle = todoTitleDraft.trim();
+
+    if (nextTitle) {
+      onUpdateTodo(editingTodoId, nextTitle);
+    }
+
+    setEditingTodoId(null);
+    setTodoTitleDraft("");
+  }, [editingTodoId, onUpdateTodo, todoTitleDraft]);
 
   return (
     <section className={notebookClassName} aria-label="任务清单">
@@ -755,7 +1138,39 @@ function TodoNotebook({
                   >
                     {todo.completed && <Check size={14} strokeWidth={2.5} />}
                   </button>
-                  <span className="todo-title">{todo.title}</span>
+                  {isTodayMode && editingTodoId === todo.id ? (
+                    <input
+                      className="todo-title-input"
+                      value={todoTitleDraft}
+                      aria-label="编辑任务名"
+                      autoFocus
+                      onChange={(event) =>
+                        setTodoTitleDraft(event.currentTarget.value)
+                      }
+                      onBlur={commitTodoTitleEdit}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          commitTodoTitleEdit();
+                        }
+
+                        if (event.key === "Escape") {
+                          setEditingTodoId(null);
+                          setTodoTitleDraft("");
+                        }
+                      }}
+                    />
+                  ) : isTodayMode ? (
+                    <button
+                      className="todo-title todo-title--editable"
+                      type="button"
+                      title="编辑任务名"
+                      onClick={() => startTodoTitleEdit(todo)}
+                    >
+                      {todo.title}
+                    </button>
+                  ) : (
+                    <span className="todo-title">{todo.title}</span>
+                  )}
                   {isTodayMode && (
                     <>
                       <button
@@ -875,6 +1290,9 @@ function App() {
   const [mode, setMode] = useState<IslandMode>("collapsed");
   const [editor, setEditor] = useState<EditorMode>(null);
   const [settings, setSettings] = useState<IslandSettings>(loadSettings);
+  const [launchAtStartup, setLaunchAtStartup] = useState(false);
+  const [settingPresets, setSettingPresets] =
+    useState<IslandPreset[]>(loadSettingPresets);
   const [todos, setTodos] = useState<TodoItem[]>(loadTodos);
   const [draftTodo, setDraftTodo] = useState("");
   const [activeTodoId, setActiveTodoId] = useState<string | null>(
@@ -930,8 +1348,16 @@ function App() {
         "--island-opacity": settings.opacity / 100,
         "--island-scale": settings.sizeScale,
         "--expanded-island-height": `${expandedIslandHeight}px`,
+        "--active-task-color": settings.taskTitleColor,
+        "--island-background-color": settings.islandBackgroundColor,
       }) as CSSProperties,
-    [expandedIslandHeight, settings.opacity, settings.sizeScale],
+    [
+      expandedIslandHeight,
+      settings.islandBackgroundColor,
+      settings.opacity,
+      settings.sizeScale,
+      settings.taskTitleColor,
+    ],
   );
 
   const syncNativeLayout = useCallback(async (nextSettings: IslandSettings) => {
@@ -1017,11 +1443,13 @@ function App() {
 
   const temporarilyHideIsland = useCallback(async () => {
     try {
-      await invoke("temporarily_hide_island");
+      await invoke("temporarily_hide_island", {
+        seconds: settings.temporaryHideSeconds,
+      });
     } catch (error) {
       console.error("Failed to temporarily hide island", error);
     }
-  }, []);
+  }, [settings.temporaryHideSeconds]);
 
   const setIslandMode = useCallback((nextMode: IslandMode) => {
     setMode(nextMode);
@@ -1065,6 +1493,20 @@ function App() {
       ),
     );
     setActiveTodoId((currentId) => (currentId === id ? null : currentId));
+  }, []);
+
+  const updateTodoTitle = useCallback((id: string, title: string) => {
+    const nextTitle = title.trim();
+
+    if (!nextTitle) {
+      return;
+    }
+
+    setTodos((currentTodos) =>
+      currentTodos.map((todo) =>
+        todo.id === id ? { ...todo, title: nextTitle } : todo,
+      ),
+    );
   }, []);
 
   const startTodo = useCallback(
@@ -1234,9 +1676,83 @@ function App() {
     scheduleNativeLayout(DEFAULT_SETTINGS);
   }, [scheduleNativeLayout]);
 
+  const saveSettingsPreset = useCallback(() => {
+    setSettingPresets((currentPresets) => {
+      const preset: IslandPreset = {
+        id: createTodoId(),
+        name: `预设 ${currentPresets.length + 1}`,
+        settings,
+        createdAt: Date.now(),
+      };
+
+      return [preset, ...currentPresets].slice(0, MAX_SETTING_PRESETS);
+    });
+  }, [settings]);
+
+  const applySettingsPreset = useCallback(
+    (presetId: string) => {
+      const preset = settingPresets.find((item) => item.id === presetId);
+
+      if (!preset) {
+        return;
+      }
+
+      const nextSettings = normalizeSettings(preset.settings);
+      setSettings(nextSettings);
+      scheduleNativeLayout(nextSettings);
+    },
+    [scheduleNativeLayout, settingPresets],
+  );
+
+  const renameSettingsPreset = useCallback((presetId: string, name: string) => {
+    const nextName = name.trim();
+
+    if (!nextName) {
+      return;
+    }
+
+    setSettingPresets((currentPresets) =>
+      currentPresets.map((preset) =>
+        preset.id === presetId ? { ...preset, name: nextName } : preset,
+      ),
+    );
+  }, []);
+
+  const deleteSettingsPreset = useCallback((presetId: string) => {
+    setSettingPresets((currentPresets) =>
+      currentPresets.filter((preset) => preset.id !== presetId),
+    );
+  }, []);
+
+  const updateLaunchAtStartup = useCallback(async (enabled: boolean) => {
+    setLaunchAtStartup(enabled);
+
+    try {
+      await invoke("set_launch_at_startup", { enabled });
+    } catch (error) {
+      console.error("Failed to update launch at startup", error);
+      setLaunchAtStartup(!enabled);
+    }
+  }, []);
+
+  useEffect(() => {
+    void invoke<boolean>("get_launch_at_startup")
+      .then(setLaunchAtStartup)
+      .catch((error) => {
+        console.error("Failed to read launch at startup", error);
+      });
+  }, []);
+
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
   }, [settings]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      SETTINGS_PRESETS_STORAGE_KEY,
+      JSON.stringify(settingPresets),
+    );
+  }, [settingPresets]);
 
   useEffect(() => {
     window.localStorage.setItem(TODOS_STORAGE_KEY, JSON.stringify(todos));
@@ -1341,6 +1857,7 @@ function App() {
         editor={editor}
         activeTaskTitle={activeTaskTitle}
         pendingTodoCount={openTodoCount}
+        temporaryHideSeconds={settings.temporaryHideSeconds}
         onToggle={toggleIsland}
         onCollapse={collapseIsland}
         onMinimize={minimizeIsland}
@@ -1352,10 +1869,18 @@ function App() {
             settings={settings}
             saveDirectoryDraft={saveDirectoryDraft}
             savePathState={savePathState}
+            highlightSavePath={saveState === "needs-path"}
+            presets={settingPresets}
+            launchAtStartup={launchAtStartup}
             onSettingsChange={setSettings}
             onReset={resetSettings}
             onSaveDirectoryDraftChange={setSaveDirectoryDraft}
             onSaveDirectory={saveDirectoryFromEditor}
+            onSavePreset={saveSettingsPreset}
+            onApplyPreset={applySettingsPreset}
+            onRenamePreset={renameSettingsPreset}
+            onDeletePreset={deleteSettingsPreset}
+            onLaunchAtStartupChange={updateLaunchAtStartup}
           />
         )}
         {editor === null && (
@@ -1372,6 +1897,7 @@ function App() {
             onDraftChange={setDraftTodo}
             onAddTodo={addTodo}
             onToggleTodo={toggleTodo}
+            onUpdateTodo={updateTodoTitle}
             onStartTodo={startTodo}
             onDeleteTodo={deleteTodo}
             onSaveToday={saveTodayTodos}

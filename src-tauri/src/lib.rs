@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::PathBuf,
+    process::Command,
     sync::{Mutex, OnceLock},
     thread,
     time::Duration,
@@ -27,6 +28,8 @@ const EXPANDED_ISLAND_WIDTH: f64 = 560.0;
 const DEFAULT_EXPANDED_ISLAND_HEIGHT: f64 = 306.0;
 const EXPANDED_RADIUS: f64 = 30.0;
 const STAGE_WINDOW_PADDING_Y: f64 = 24.0;
+const STARTUP_REGISTRY_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+const STARTUP_REGISTRY_VALUE: &str = "FocuSD Island";
 
 static WINDOW_STATE: OnceLock<Mutex<IslandWindowState>> = OnceLock::new();
 
@@ -133,17 +136,69 @@ fn minimize_island(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn temporarily_hide_island(app: AppHandle) -> Result<(), String> {
+fn temporarily_hide_island(app: AppHandle, seconds: u64) -> Result<(), String> {
+    let seconds = seconds.clamp(1, 60);
+
     hide_island(&app);
 
     thread::spawn(move || {
-        thread::sleep(Duration::from_secs(5));
+        thread::sleep(Duration::from_secs(seconds));
         if let Ok(window) = main_window(&app) {
             let _ = window.show();
         }
     });
 
     Ok(())
+}
+
+#[tauri::command]
+fn get_launch_at_startup() -> Result<bool, String> {
+    let status = Command::new("reg")
+        .args(["query", STARTUP_REGISTRY_KEY, "/v", STARTUP_REGISTRY_VALUE])
+        .status()
+        .map_err(|error| format!("Failed to query startup registry: {error}"))?;
+
+    Ok(status.success())
+}
+
+#[tauri::command]
+fn set_launch_at_startup(enabled: bool) -> Result<(), String> {
+    let status = if enabled {
+        let current_exe = std::env::current_exe()
+            .map_err(|error| format!("Failed to resolve current executable: {error}"))?;
+        let startup_value = format!("\"{}\"", current_exe.display());
+
+        Command::new("reg")
+            .args([
+                "add",
+                STARTUP_REGISTRY_KEY,
+                "/v",
+                STARTUP_REGISTRY_VALUE,
+                "/t",
+                "REG_SZ",
+                "/d",
+            ])
+            .arg(startup_value)
+            .arg("/f")
+            .status()
+    } else {
+        Command::new("reg")
+            .args([
+                "delete",
+                STARTUP_REGISTRY_KEY,
+                "/v",
+                STARTUP_REGISTRY_VALUE,
+                "/f",
+            ])
+            .status()
+    }
+    .map_err(|error| format!("Failed to update startup registry: {error}"))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err("Startup registry command failed.".to_string())
+    }
 }
 
 #[tauri::command]
@@ -392,7 +447,9 @@ pub fn run() {
             set_island_interaction,
             save_todo_markdown,
             minimize_island,
-            temporarily_hide_island
+            temporarily_hide_island,
+            get_launch_at_startup,
+            set_launch_at_startup
         ])
         .run(tauri::generate_context!())
         .expect("error while running FocuSD Island");
