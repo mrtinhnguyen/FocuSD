@@ -303,7 +303,7 @@ function IslandShell({
         <span className="island__pulse" />
         <span className="island__brand">FocuSD</span>
         {activeTaskTitle ? (
-          <span className="island__active-task">{activeTaskTitle}</span>
+          <span className="island__active-task">· {activeTaskTitle}</span>
         ) : (
           <span className="island__todo-count">
             · 剩余{pendingTodoCount}个待办
@@ -594,9 +594,16 @@ function TodoNotebook({
       : "Review your todos";
   const archiveTitle =
     archiveLayout === "cards" ? "Notebook cards" : "Two-column timeline";
+  const notebookClassName = [
+    "todo-notebook",
+    isArchiveMode ? "todo-notebook--archive" : "",
+    isArchiveMode ? `todo-notebook--archive-${archiveLayout}` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
-    <section className="todo-notebook" aria-label="任务清单">
+    <section className={notebookClassName} aria-label="任务清单">
       <div className="todo-notebook__spine">
         <button
           className={[
@@ -797,7 +804,8 @@ function ArchiveBrowser({
       return;
     }
 
-    event.currentTarget.scrollLeft += event.deltaY;
+    event.preventDefault();
+    event.currentTarget.scrollLeft += event.deltaY + event.deltaX;
   };
 
   if (archives.length === 0) {
@@ -825,23 +833,40 @@ function ArchiveBrowser({
 
   return (
     <div className="archive-cards" role="list" onWheel={handleHorizontalWheel}>
-      {archives.map((archive) => (
-        <button
-          className="archive-card"
-          key={archive.date}
-          type="button"
-          role="listitem"
-          onClick={() => onSelectArchive(archive.date)}
-        >
-          <strong>{archive.date}</strong>
-          <span>
-            {archive.todos
-              .slice(0, 3)
-              .map((todo) => todo.title)
-              .join(" / ") || "No tasks"}
-          </span>
-        </button>
-      ))}
+      {archives.map((archive) => {
+        const previewTodos = archive.todos.slice(0, 3);
+
+        return (
+          <button
+            className="archive-card"
+            key={archive.date}
+            type="button"
+            role="listitem"
+            onClick={() => onSelectArchive(archive.date)}
+          >
+            <strong className="archive-card__date">{archive.date}</strong>
+            <span className="archive-card__preview">
+              {previewTodos.length > 0 ? (
+                previewTodos.map((todo) => (
+                  <span className="archive-card__todo" key={todo.id}>
+                    <span
+                      className={[
+                        "archive-card__todo-mark",
+                        todo.completed ? "archive-card__todo-mark--done" : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
+                    />
+                    <span>{todo.title}</span>
+                  </span>
+                ))
+              ) : (
+                <span className="archive-card__empty">No tasks</span>
+              )}
+            </span>
+          </button>
+        );
+      })}
     </div>
   );
 }
