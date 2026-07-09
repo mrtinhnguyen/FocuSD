@@ -23,6 +23,7 @@ FocuSD Island 是一个轻量的桌面效率工具。它以透明、无边框、
 - 历史回顾：以卡片或时间线方式查看已归档日期
 - 布局设置：透明度、缩放、顶部间距、颜色主题
 - 预设管理：保存、应用、重命名和删除自定义外观预设
+- AI Agent 状态灯：通过设置页一键安装/修复 Codex 与 Claude Code hooks，任务运行时红灯，空闲/完成时绿灯
 - 系统托盘：显示、隐藏和退出应用
 - 开机自启动：通过 Windows 当前用户启动项控制
 
@@ -106,6 +107,7 @@ src-tauri/target/release/focusd-island.exe
 - 待办、笔记、归档和外观设置默认保存在浏览器 `localStorage` 中。
 - 在设置面板中填写待办保存目录后，可以将当天内容保存为 Markdown 文件。
 - Markdown 文件名格式为 `YYYY-MM-DD.md`。
+- AI Agent 状态灯通过 `%APPDATA%\com.focusd.island\agent-status.json` 和同目录 marker 文件读取 Codex / Claude Code hook 状态。
 - 开机自启动使用 Windows 注册表当前用户启动项：`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`。
 
 ## 项目结构
@@ -170,6 +172,7 @@ The project is currently an early MVP and is mainly designed for Windows desktop
 - Archive review with notebook cards or a two-column timeline
 - Layout settings for opacity, scale, top margin, and colors
 - Preset management for saving, applying, renaming, and deleting custom looks
+- AI agent status light: install or repair Codex and Claude Code hooks from Settings, turning red while an agent task is running and green when idle or finished
 - System tray menu for showing, hiding, and quitting the app
 - Launch-at-startup support through the current Windows user startup registry entry
 
@@ -253,6 +256,7 @@ src-tauri/target/release/focusd-island.exe
 - Todos, notes, archives, and appearance settings are stored in browser `localStorage` by default.
 - After setting a todo save directory in the settings panel, today's content can be saved as a Markdown file.
 - Markdown files use the `YYYY-MM-DD.md` filename format.
+- The AI agent status light reads Codex / Claude Code hook state from `%APPDATA%\com.focusd.island\agent-status.json` and marker files in the same directory.
 - Launch-at-startup uses the current Windows user registry path: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 
 ## Project Structure

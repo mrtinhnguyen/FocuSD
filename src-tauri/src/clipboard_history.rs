@@ -51,6 +51,8 @@ const SHORT_DUPLICATE_WINDOW_MS: i64 = 2_000;
 const MAX_IMAGE_PNG_BYTES: usize = 10 * 1024 * 1024;
 const THUMBNAIL_MAX_SIDE: u32 = 128;
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
+const CLIPBOARD_WRITE_RETRY_ATTEMPTS: usize = 8;
+const CLIPBOARD_WRITE_RETRY_DELAY: Duration = Duration::from_millis(35);
 const HOTKEY_ID: i32 = 0x4643;
 const HOTKEY_REFRESH_MESSAGE: u32 = WM_APP + 0x51;
 
@@ -307,10 +309,7 @@ impl ClipboardHistoryService {
                     .text
                     .clone()
                     .ok_or_else(|| "Clipboard text item has no text.".to_string())?;
-                Clipboard::new()
-                    .map_err(|error| format!("Failed to open clipboard: {error}"))?
-                    .set_text(text)
-                    .map_err(|error| format!("Failed to set clipboard text: {error}"))?;
+                write_clipboard_text(&text)?;
             }
             ClipboardHistoryItemKind::Image => {
                 let image = item
@@ -320,14 +319,7 @@ impl ClipboardHistoryService {
                 let rgba = image::open(&image.original_path)
                     .map_err(|error| format!("Failed to load clipboard image: {error}"))?
                     .to_rgba8();
-                Clipboard::new()
-                    .map_err(|error| format!("Failed to open clipboard: {error}"))?
-                    .set_image(ImageData {
-                        width: rgba.width() as usize,
-                        height: rgba.height() as usize,
-                        bytes: Cow::Owned(rgba.into_raw()),
-                    })
-                    .map_err(|error| format!("Failed to set clipboard image: {error}"))?;
+                write_clipboard_image(rgba.width() as usize, rgba.height() as usize, &rgba)?;
             }
         }
 
@@ -603,6 +595,53 @@ fn read_clipboard_capture(capture_images: bool) -> Result<Option<ClipboardCaptur
     }
 
     Ok(None)
+}
+
+fn write_clipboard_text(text: &str) -> Result<(), String> {
+    retry_clipboard_write("set clipboard text", || {
+        Clipboard::new()
+            .map_err(|error| format!("Failed to open clipboard: {error}"))?
+            .set_text(text.to_owned())
+            .map_err(|error| format!("Failed to set clipboard text: {error}"))
+    })
+}
+
+fn write_clipboard_image(width: usize, height: usize, image: &RgbaImage) -> Result<(), String> {
+    retry_clipboard_write("set clipboard image", || {
+        Clipboard::new()
+            .map_err(|error| format!("Failed to open clipboard: {error}"))?
+            .set_image(ImageData {
+                width,
+                height,
+                bytes: Cow::Owned(image.as_raw().clone()),
+            })
+            .map_err(|error| format!("Failed to set clipboard image: {error}"))
+    })
+}
+
+fn retry_clipboard_write(
+    action: &str,
+    mut write: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    let mut last_error = None;
+
+    for attempt in 0..CLIPBOARD_WRITE_RETRY_ATTEMPTS {
+        match write() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+
+                if attempt + 1 < CLIPBOARD_WRITE_RETRY_ATTEMPTS {
+                    thread::sleep(CLIPBOARD_WRITE_RETRY_DELAY);
+                }
+            }
+        }
+    }
+
+    Err(format!(
+        "Failed to {action} after {CLIPBOARD_WRITE_RETRY_ATTEMPTS} attempts: {}",
+        last_error.unwrap_or_else(|| "unknown error".to_string())
+    ))
 }
 
 fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, String> {

@@ -1,8 +1,9 @@
 mod clipboard_history;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
 use std::{
-    fs,
+    env, fs,
     os::windows::process::CommandExt,
     path::{Path, PathBuf},
     process::Command,
@@ -55,6 +56,13 @@ const CODEX_RUNNING_MARKER_FILE_NAME: &str = "agent-codex-running.flag";
 const CODEX_RUNNING_HOLD_FILE_NAME: &str = "agent-codex-running-hold.flag";
 const CLAUDE_CODE_RUNNING_MARKER_FILE_NAME: &str = "agent-claudeCode-running.flag";
 const CLAUDE_CODE_RUNNING_HOLD_FILE_NAME: &str = "agent-claudeCode-running-hold.flag";
+const AGENT_RUNNING_SCRIPT_FILE_NAME: &str = "focusd-agent-running.cmd";
+const AGENT_STATUS_SCRIPT_FILE_NAME: &str = "focusd-agent-status.ps1";
+const FOCUSD_AGENT_HOOK_BLOCK_BEGIN: &str = "# BEGIN FocuSD Agent Status Hooks";
+const FOCUSD_AGENT_HOOK_BLOCK_END: &str = "# END FocuSD Agent Status Hooks";
+const FOCUSD_AGENT_HOOK_SIGNATURE: &str = "focusd-agent-";
+const AGENT_RUNNING_SCRIPT: &str = include_str!("../../scripts/focusd-agent-running.cmd");
+const AGENT_STATUS_SCRIPT: &str = include_str!("../../scripts/focusd-agent-status.ps1");
 
 static WINDOW_STATE: OnceLock<Mutex<IslandWindowState>> = OnceLock::new();
 
@@ -183,6 +191,16 @@ struct AgentStatusSnapshot {
     claude_code: AgentTaskStatus,
     updated_at: i64,
     status_path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentHooksInstallResult {
+    scripts_dir: String,
+    status_path: String,
+    codex_config_path: String,
+    claude_config_path: String,
+    installed_at: i64,
 }
 
 fn default_agent_phase() -> String {
@@ -347,6 +365,46 @@ fn get_agent_status(app: AppHandle) -> Result<AgentStatusSnapshot, String> {
 }
 
 #[tauri::command]
+fn install_agent_status_hooks(app: AppHandle) -> Result<AgentHooksInstallResult, String> {
+    let app_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Failed to resolve app data directory: {error}"))?;
+    fs::create_dir_all(&app_dir)
+        .map_err(|error| format!("Failed to create app data directory: {error}"))?;
+
+    install_agent_hook_scripts(&app_dir)?;
+
+    let running_script_path = app_dir.join(AGENT_RUNNING_SCRIPT_FILE_NAME);
+    let status_script_path = app_dir.join(AGENT_STATUS_SCRIPT_FILE_NAME);
+    let home_dir = windows_home_dir()?;
+    let codex_config_path = home_dir.join(".codex").join("config.toml");
+    let claude_config_path = home_dir.join(".claude").join("settings.json");
+
+    install_codex_status_hooks(
+        &codex_config_path,
+        &running_script_path,
+        &status_script_path,
+    )?;
+    install_claude_code_status_hooks(
+        &claude_config_path,
+        &running_script_path,
+        &status_script_path,
+    )?;
+
+    Ok(AgentHooksInstallResult {
+        scripts_dir: app_dir.to_string_lossy().to_string(),
+        status_path: app_dir
+            .join(AGENT_STATUS_FILE_NAME)
+            .to_string_lossy()
+            .to_string(),
+        codex_config_path: codex_config_path.to_string_lossy().to_string(),
+        claude_config_path: claude_config_path.to_string_lossy().to_string(),
+        installed_at: current_unix_millis(),
+    })
+}
+
+#[tauri::command]
 fn get_media_state() -> MediaState {
     read_media_state()
 }
@@ -425,6 +483,7 @@ fn apply_agent_running_markers(app_dir: &Path, snapshot: &mut AgentStatusSnapsho
 
     if let Some(updated_at) = active_agent_running_marker_time(
         app_dir,
+        &snapshot.codex,
         CODEX_RUNNING_MARKER_FILE_NAME,
         CODEX_RUNNING_HOLD_FILE_NAME,
         now,
@@ -435,6 +494,7 @@ fn apply_agent_running_markers(app_dir: &Path, snapshot: &mut AgentStatusSnapsho
 
     if let Some(updated_at) = active_agent_running_marker_time(
         app_dir,
+        &snapshot.claude_code,
         CLAUDE_CODE_RUNNING_MARKER_FILE_NAME,
         CLAUDE_CODE_RUNNING_HOLD_FILE_NAME,
         now,
@@ -446,13 +506,22 @@ fn apply_agent_running_markers(app_dir: &Path, snapshot: &mut AgentStatusSnapsho
 
 fn active_agent_running_marker_time(
     app_dir: &Path,
+    status: &AgentTaskStatus,
     running_file_name: &str,
     hold_file_name: &str,
     now: i64,
 ) -> Option<i64> {
     let running_path = app_dir.join(running_file_name);
     if running_path.is_file() {
-        return Some(file_modified_unix_millis(&running_path).unwrap_or(now));
+        let marker_updated_at = file_modified_unix_millis(&running_path).unwrap_or(now);
+        if status.phase != "running"
+            && status.updated_at > 0
+            && status.updated_at >= marker_updated_at
+        {
+            return None;
+        }
+
+        return Some(marker_updated_at);
     }
 
     let hold_path = app_dir.join(hold_file_name);
@@ -475,6 +544,373 @@ fn normalize_agent_task_status(mut status: AgentTaskStatus) -> AgentTaskStatus {
     }
 
     status
+}
+
+fn install_agent_hook_scripts(app_dir: &Path) -> Result<(), String> {
+    write_text_file(
+        &app_dir.join(AGENT_RUNNING_SCRIPT_FILE_NAME),
+        &normalize_windows_line_endings(AGENT_RUNNING_SCRIPT),
+    )?;
+    write_text_file(
+        &app_dir.join(AGENT_STATUS_SCRIPT_FILE_NAME),
+        &normalize_windows_line_endings(AGENT_STATUS_SCRIPT),
+    )
+}
+
+fn install_codex_status_hooks(
+    config_path: &Path,
+    running_script_path: &Path,
+    status_script_path: &Path,
+) -> Result<(), String> {
+    let content = fs::read_to_string(config_path).unwrap_or_default();
+    let content = remove_managed_codex_hook_block(&content);
+    let block = build_codex_hook_block(running_script_path, status_script_path);
+    let mut next_content = content.trim_end().to_string();
+    if !next_content.is_empty() {
+        next_content.push_str("\n\n");
+    }
+    next_content.push_str(&block);
+
+    write_text_file(config_path, &next_content)
+}
+
+fn install_claude_code_status_hooks(
+    config_path: &Path,
+    running_script_path: &Path,
+    status_script_path: &Path,
+) -> Result<(), String> {
+    let mut config = match fs::read_to_string(config_path) {
+        Ok(content) if !content.trim().is_empty() => serde_json::from_str::<Value>(&content)
+            .map_err(|error| format!("Failed to parse Claude Code settings.json: {error}"))?,
+        _ => json!({}),
+    };
+
+    let Some(root) = config.as_object_mut() else {
+        return Err("Claude Code settings.json must contain a JSON object.".to_string());
+    };
+
+    let hooks = root
+        .entry("hooks")
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !hooks.is_object() {
+        *hooks = Value::Object(Map::new());
+    }
+    let hooks = hooks
+        .as_object_mut()
+        .ok_or_else(|| "Failed to prepare Claude Code hooks object.".to_string())?;
+
+    install_claude_code_hook_event(
+        hooks,
+        "UserPromptSubmit",
+        claude_code_running_hook_entry(running_script_path),
+    );
+    install_claude_code_hook_event(
+        hooks,
+        "PreToolUse",
+        claude_code_match_all_hook_entry(claude_code_running_hook_entry(running_script_path)),
+    );
+    install_claude_code_hook_event(
+        hooks,
+        "Stop",
+        claude_code_status_hook_entry(status_script_path, "completed"),
+    );
+    install_claude_code_hook_event(
+        hooks,
+        "StopFailure",
+        claude_code_status_hook_entry(status_script_path, "failed"),
+    );
+
+    let json = serde_json::to_string_pretty(&config)
+        .map_err(|error| format!("Failed to serialize Claude Code settings.json: {error}"))?;
+    write_text_file(config_path, &json)
+}
+
+fn install_claude_code_hook_event(hooks: &mut Map<String, Value>, event_name: &str, entry: Value) {
+    let mut entries = hooks
+        .remove(event_name)
+        .and_then(|value| match value {
+            Value::Array(entries) => Some(entries),
+            _ => None,
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(remove_managed_claude_code_hooks)
+        .collect::<Vec<_>>();
+
+    entries.push(entry);
+    hooks.insert(event_name.to_string(), Value::Array(entries));
+}
+
+fn remove_managed_claude_code_hooks(mut entry: Value) -> Option<Value> {
+    let Value::Object(entry_object) = &mut entry else {
+        return Some(entry);
+    };
+
+    let Some(hooks_value) = entry_object.get_mut("hooks") else {
+        return Some(entry);
+    };
+
+    let Value::Array(hooks) = hooks_value else {
+        return Some(entry);
+    };
+
+    hooks.retain(|hook| !value_contains_focusd_hook_signature(hook));
+    if hooks.is_empty() {
+        None
+    } else {
+        Some(entry)
+    }
+}
+
+fn value_contains_focusd_hook_signature(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text.contains(FOCUSD_AGENT_HOOK_SIGNATURE),
+        Value::Array(values) => values.iter().any(value_contains_focusd_hook_signature),
+        Value::Object(values) => values.values().any(value_contains_focusd_hook_signature),
+        _ => false,
+    }
+}
+
+fn claude_code_match_all_hook_entry(mut entry: Value) -> Value {
+    if let Value::Object(object) = &mut entry {
+        object.insert("matcher".to_string(), Value::String("*".to_string()));
+    }
+
+    entry
+}
+
+fn claude_code_running_hook_entry(script_path: &Path) -> Value {
+    claude_code_hook_entry(
+        "cmd.exe",
+        vec![
+            "/d".to_string(),
+            "/s".to_string(),
+            "/c".to_string(),
+            format!("\"{}\" claudeCode", script_path.to_string_lossy()),
+        ],
+        1,
+    )
+}
+
+fn claude_code_status_hook_entry(script_path: &Path, phase: &str) -> Value {
+    claude_code_hook_entry(
+        "powershell.exe",
+        vec![
+            "-NoProfile".to_string(),
+            "-ExecutionPolicy".to_string(),
+            "Bypass".to_string(),
+            "-File".to_string(),
+            script_path.to_string_lossy().to_string(),
+            "claudeCode".to_string(),
+            phase.to_string(),
+        ],
+        5,
+    )
+}
+
+fn claude_code_hook_entry(command: &str, args: Vec<String>, timeout: i64) -> Value {
+    json!({
+        "hooks": [
+            {
+                "type": "command",
+                "command": command,
+                "args": args,
+                "timeout": timeout
+            }
+        ]
+    })
+}
+
+fn build_codex_hook_block(running_script_path: &Path, status_script_path: &Path) -> String {
+    let submit_command = agent_running_command(running_script_path, "codex");
+    let stop_command = agent_status_command(status_script_path, "codex", "completed");
+
+    format!(
+        r#"{begin}
+
+[[hooks.UserPromptSubmit]]
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = {submit_command}
+command_windows = {submit_command}
+timeout = 1
+statusMessage = "Updating FocuSD agent status"
+
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+type = "command"
+command = {stop_command}
+command_windows = {stop_command}
+timeout = 5
+statusMessage = "Updating FocuSD agent status"
+
+{end}"#,
+        begin = FOCUSD_AGENT_HOOK_BLOCK_BEGIN,
+        end = FOCUSD_AGENT_HOOK_BLOCK_END,
+        submit_command = toml_basic_string(&submit_command),
+        stop_command = toml_basic_string(&stop_command),
+    )
+}
+
+fn remove_managed_codex_hook_block(content: &str) -> String {
+    let mut remaining = content;
+    let mut next_content = String::new();
+
+    while let Some(start) = remaining.find(FOCUSD_AGENT_HOOK_BLOCK_BEGIN) {
+        next_content.push_str(&remaining[..start]);
+        let after_begin = &remaining[start..];
+        let Some(end) = after_begin.find(FOCUSD_AGENT_HOOK_BLOCK_END) else {
+            remaining = "";
+            break;
+        };
+
+        remaining = &after_begin[end + FOCUSD_AGENT_HOOK_BLOCK_END.len()..];
+        if let Some(stripped) = remaining.strip_prefix("\r\n") {
+            remaining = stripped;
+        } else if let Some(stripped) = remaining.strip_prefix('\n') {
+            remaining = stripped;
+        }
+    }
+
+    next_content.push_str(remaining);
+    remove_legacy_codex_focusd_hooks(&next_content)
+}
+
+fn remove_legacy_codex_focusd_hooks(content: &str) -> String {
+    let lines = content.lines().collect::<Vec<_>>();
+    let mut next_lines: Vec<&str> = Vec::new();
+    let mut index = 0;
+
+    while index < lines.len() {
+        let trimmed = lines[index].trim();
+        if let Some(hook_path) = codex_hook_event_path(trimmed) {
+            let start = index;
+            index += 1;
+
+            while index < lines.len() && !lines[index].trim().starts_with('[') {
+                index += 1;
+            }
+
+            let metadata_end = index;
+            let mut kept_child_ranges = Vec::new();
+            let mut removed_managed_child = false;
+
+            while index < lines.len() {
+                let candidate = lines[index].trim();
+                if !is_codex_nested_hook_header_for(candidate, &hook_path) {
+                    break;
+                }
+
+                let child_start = index;
+                index += 1;
+                while index < lines.len() && !lines[index].trim().starts_with('[') {
+                    index += 1;
+                }
+
+                let child_block = lines[child_start..index].join("\n");
+                if child_block.contains(FOCUSD_AGENT_HOOK_SIGNATURE) {
+                    removed_managed_child = true;
+                } else {
+                    kept_child_ranges.push(child_start..index);
+                }
+            }
+
+            if !removed_managed_child {
+                next_lines.extend_from_slice(&lines[start..index]);
+                continue;
+            }
+
+            if kept_child_ranges.is_empty() {
+                continue;
+            }
+
+            next_lines.extend_from_slice(&lines[start..metadata_end]);
+            for range in kept_child_ranges {
+                next_lines.extend_from_slice(&lines[range]);
+            }
+            continue;
+        }
+
+        next_lines.push(lines[index]);
+        index += 1;
+    }
+
+    next_lines.join("\n")
+}
+
+fn codex_hook_event_path(header: &str) -> Option<String> {
+    if !header.starts_with("[[hooks.") || !header.ends_with("]]") {
+        return None;
+    }
+
+    let hook_path = header.strip_prefix("[[")?.strip_suffix("]]")?;
+    if hook_path.ends_with(".hooks") {
+        return None;
+    }
+
+    Some(hook_path.to_string())
+}
+
+fn is_codex_nested_hook_header_for(header: &str, hook_path: &str) -> bool {
+    header == format!("[[{hook_path}.hooks]]")
+}
+
+fn agent_running_command(script_path: &Path, provider: &str) -> String {
+    format!(
+        "cmd.exe /d /s /c \"\"{}\" {}\"",
+        script_path.to_string_lossy(),
+        provider
+    )
+}
+
+fn agent_status_command(script_path: &Path, provider: &str, phase: &str) -> String {
+    format!(
+        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{}\" {} {}",
+        script_path.to_string_lossy(),
+        provider,
+        phase
+    )
+}
+
+fn toml_basic_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+fn write_text_file(path: &Path, content: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create {}: {error}", parent.display()))?;
+    }
+
+    let temporary_path = path.with_extension("tmp");
+    fs::write(&temporary_path, content)
+        .map_err(|error| format!("Failed to write {}: {error}", temporary_path.display()))?;
+    fs::rename(&temporary_path, path)
+        .or_else(|_| {
+            fs::remove_file(path).ok();
+            fs::rename(&temporary_path, path)
+        })
+        .map_err(|error| format!("Failed to replace {}: {error}", path.display()))
+}
+
+fn normalize_windows_line_endings(content: &str) -> String {
+    content.replace("\r\n", "\n").replace('\n', "\r\n")
+}
+
+fn windows_home_dir() -> Result<PathBuf, String> {
+    if let Ok(user_profile) = env::var("USERPROFILE") {
+        let user_profile = user_profile.trim();
+        if !user_profile.is_empty() {
+            return Ok(PathBuf::from(user_profile));
+        }
+    }
+
+    match (env::var("HOMEDRIVE"), env::var("HOMEPATH")) {
+        (Ok(home_drive), Ok(home_path)) if !home_drive.is_empty() && !home_path.is_empty() => {
+            Ok(PathBuf::from(format!("{home_drive}{home_path}")))
+        }
+        _ => Err("Failed to resolve the Windows user profile directory.".to_string()),
+    }
 }
 
 fn read_system_audio_peak_window(samples: usize, delay: Duration) -> Result<f32, String> {
@@ -800,6 +1236,7 @@ pub fn run() {
             get_launch_at_startup,
             set_launch_at_startup,
             get_agent_status,
+            install_agent_status_hooks,
             get_media_state,
             get_audio_level,
             media_play_pause,

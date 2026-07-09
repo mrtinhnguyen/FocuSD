@@ -126,6 +126,16 @@ type AgentStatusSnapshot = Record<AgentProvider, AgentTaskStatus> & {
   statusPath: string;
 };
 
+type AgentHooksInstallResult = {
+  scriptsDir: string;
+  statusPath: string;
+  codexConfigPath: string;
+  claudeConfigPath: string;
+  installedAt: number;
+};
+
+type AgentHooksInstallState = "idle" | "installing" | "installed" | "error";
+
 type IslandSettings = {
   opacity: number;
   sizeScale: number;
@@ -242,6 +252,10 @@ function getColorSetting(value: unknown, fallback: string) {
   return typeof value === "string" && HEX_COLOR_PATTERN.test(value)
     ? value
     : fallback;
+}
+
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function hexToRgba(hex: string, alpha: number) {
@@ -1103,6 +1117,9 @@ function LayoutEditor({
   focusClipboardShortcutToken,
   presets,
   launchAtStartup,
+  agentHooksInstallState,
+  agentHooksInstallResult,
+  agentHooksInstallError,
   onSettingsChange,
   onClipboardSettingsChange,
   onReset,
@@ -1113,6 +1130,7 @@ function LayoutEditor({
   onRenamePreset,
   onDeletePreset,
   onLaunchAtStartupChange,
+  onInstallAgentHooks,
   onClipboardShortcutFocusHandled,
 }: {
   settings: IslandSettings;
@@ -1123,6 +1141,9 @@ function LayoutEditor({
   focusClipboardShortcutToken: number;
   presets: IslandPreset[];
   launchAtStartup: boolean;
+  agentHooksInstallState: AgentHooksInstallState;
+  agentHooksInstallResult: AgentHooksInstallResult | null;
+  agentHooksInstallError: string;
   onSettingsChange: (settings: IslandSettings) => void;
   onClipboardSettingsChange: (settings: ClipboardHistorySettings) => void;
   onReset: () => void;
@@ -1133,6 +1154,7 @@ function LayoutEditor({
   onRenamePreset: (presetId: string, name: string) => void;
   onDeletePreset: (presetId: string) => void;
   onLaunchAtStartupChange: (enabled: boolean) => void;
+  onInstallAgentHooks: () => void;
   onClipboardShortcutFocusHandled: () => void;
 }) {
   const savePathPanelRef = useRef<HTMLElement | null>(null);
@@ -1285,6 +1307,51 @@ function LayoutEditor({
           checked={settings.showTitle}
           onChange={(showTitle) => onSettingsChange({ ...settings, showTitle })}
         />
+      </section>
+
+      <section className="settings-section settings-section--agent-hooks">
+        <div className="settings-section__header">
+          <span>AI Agent 状态灯</span>
+          <button
+            className={[
+              "agent-hooks-button",
+              agentHooksInstallState === "installed"
+                ? "agent-hooks-button--installed"
+                : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
+            type="button"
+            disabled={agentHooksInstallState === "installing"}
+            onClick={onInstallAgentHooks}
+          >
+            {agentHooksInstallState === "installed" ? (
+              <Check size={13} strokeWidth={2.6} />
+            ) : (
+              <RefreshCcw size={13} strokeWidth={2.4} />
+            )}
+            <span>
+              {agentHooksInstallState === "installing"
+                ? "安装中"
+                : agentHooksInstallState === "installed"
+                  ? "已安装"
+                  : "安装/修复"}
+            </span>
+          </button>
+        </div>
+        {agentHooksInstallState === "installed" && agentHooksInstallResult ? (
+          <div className="agent-hooks-status agent-hooks-status--ok">
+            <span>脚本目录</span>
+            <strong title={agentHooksInstallResult.scriptsDir}>
+              {agentHooksInstallResult.scriptsDir}
+            </strong>
+          </div>
+        ) : null}
+        {agentHooksInstallState === "error" ? (
+          <div className="agent-hooks-status agent-hooks-status--error">
+            {agentHooksInstallError}
+          </div>
+        ) : null}
       </section>
 
       <section
@@ -2157,7 +2224,7 @@ function ClipboardHistoryPanel({
   onClear,
 }: {
   snapshot: ClipboardHistorySnapshot;
-  onCopyItem: (id: string) => Promise<void> | void;
+  onCopyItem: (id: string) => Promise<boolean> | boolean;
   onDeleteItem: (id: string) => Promise<void> | void;
   onClear: () => Promise<void> | void;
 }) {
@@ -2351,8 +2418,11 @@ function ClipboardHistoryPanel({
 
   const handleCopyItem = useCallback(
     (id: string) => {
-      showCopiedState(id);
-      void Promise.resolve(onCopyItem(id));
+      void Promise.resolve(onCopyItem(id)).then((didCopy) => {
+        if (didCopy) {
+          showCopiedState(id);
+        }
+      });
     },
     [onCopyItem, showCopiedState],
   );
@@ -2566,6 +2636,11 @@ function App() {
   const [savePathState, setSavePathState] = useState<SavePathState>("idle");
   const [clipboardHistory, setClipboardHistory] =
     useState<ClipboardHistorySnapshot>(DEFAULT_CLIPBOARD_HISTORY);
+  const [agentHooksInstallState, setAgentHooksInstallState] =
+    useState<AgentHooksInstallState>("idle");
+  const [agentHooksInstallResult, setAgentHooksInstallResult] =
+    useState<AgentHooksInstallResult | null>(null);
+  const [agentHooksInstallError, setAgentHooksInstallError] = useState("");
   const [focusClipboardShortcutToken, setFocusClipboardShortcutToken] =
     useState(0);
   const clipboardShortcutToggleAt = useRef(0);
@@ -2780,8 +2855,10 @@ function App() {
         { id },
       );
       setClipboardHistory(snapshot);
+      return true;
     } catch (error) {
       console.error("Failed to copy clipboard history item", error);
+      return false;
     }
   }, []);
 
@@ -3296,6 +3373,24 @@ function App() {
     }
   }, []);
 
+  const installAgentHooks = useCallback(async () => {
+    setAgentHooksInstallState("installing");
+    setAgentHooksInstallError("");
+
+    try {
+      const result = await invoke<AgentHooksInstallResult>(
+        "install_agent_status_hooks",
+      );
+      setAgentHooksInstallResult(result);
+      setAgentHooksInstallState("installed");
+      void refreshAgentStatus();
+    } catch (error) {
+      console.error("Failed to install agent status hooks", error);
+      setAgentHooksInstallError(getErrorMessage(error));
+      setAgentHooksInstallState("error");
+    }
+  }, [refreshAgentStatus]);
+
   useEffect(() => {
     void invoke<boolean>("get_launch_at_startup")
       .then(setLaunchAtStartup)
@@ -3538,6 +3633,9 @@ function App() {
             focusClipboardShortcutToken={focusClipboardShortcutToken}
             presets={settingPresets}
             launchAtStartup={launchAtStartup}
+            agentHooksInstallState={agentHooksInstallState}
+            agentHooksInstallResult={agentHooksInstallResult}
+            agentHooksInstallError={agentHooksInstallError}
             onSettingsChange={setSettings}
             onClipboardSettingsChange={updateClipboardSettings}
             onReset={resetSettings}
@@ -3548,6 +3646,7 @@ function App() {
             onRenamePreset={renameSettingsPreset}
             onDeletePreset={deleteSettingsPreset}
             onLaunchAtStartupChange={updateLaunchAtStartup}
+            onInstallAgentHooks={installAgentHooks}
             onClipboardShortcutFocusHandled={clearClipboardShortcutFocus}
           />
         )}
@@ -3562,7 +3661,7 @@ function App() {
         {page === "clipboard" && (
           <ClipboardHistoryPanel
             snapshot={clipboardHistory}
-            onCopyItem={(id) => void copyClipboardHistoryItem(id)}
+            onCopyItem={copyClipboardHistoryItem}
             onDeleteItem={(id) => void deleteClipboardHistoryItem(id)}
             onClear={() => void clearClipboardHistoryItems()}
           />

@@ -1872,6 +1872,7 @@ input {
 .settings-section--clipboard,
 .settings-section--colors,
 .settings-section--presets,
+.settings-section--agent-hooks,
 .settings-section--storage {
   margin-top: 6px;
   padding-top: 12px;
@@ -1920,6 +1921,89 @@ input {
 .reset-button:focus-visible {
   outline: 2px solid rgba(143, 216, 255, 0.88);
   outline-offset: 3px;
+}
+
+.agent-hooks-button {
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 10px;
+  color: #111112;
+  background: #a8d8ea;
+  border: 0;
+  border-radius: 999px;
+  outline: none;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+  transition:
+    background 140ms ease,
+    color 140ms ease,
+    opacity 140ms ease,
+    transform 140ms ease;
+}
+
+.agent-hooks-button:hover:not(:disabled) {
+  background: #c0e8f5;
+}
+
+.agent-hooks-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.agent-hooks-button--installed {
+  color: #ffffff;
+  background: #2f8c61;
+}
+
+.agent-hooks-button--installed:hover:not(:disabled) {
+  background: #37a06f;
+}
+
+.agent-hooks-button:focus-visible {
+  outline: 2px solid rgba(143, 216, 255, 0.88);
+  outline-offset: 2px;
+}
+
+.agent-hooks-status {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  padding: 8px 10px;
+  color: rgba(248, 246, 240, 0.68);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.agent-hooks-status span {
+  color: rgba(248, 246, 240, 0.52);
+}
+
+.agent-hooks-status strong {
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(248, 246, 240, 0.88);
+  font-size: 11px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-hooks-status--ok {
+  border-color: rgba(102, 255, 184, 0.2);
+}
+
+.agent-hooks-status--error {
+  color: #ffd8df;
+  border-color: rgba(255, 77, 94, 0.28);
+  background: rgba(255, 77, 94, 0.09);
 }
 
 .slider-control {

@@ -1,16 +1,38 @@
 # AI Agent Status Hooks
 
-FocuSD reads agent state from the app data directory:
+FocuSD can mirror Codex and Claude Code task activity on the collapsed island status light:
+
+- running task: red
+- completed, failed, idle, or no task: green
+
+Do not use process or CPU detection for this integration. Codex and Claude Code can stay alive while idle, and Claude Code may run inside a VSCode terminal. The reliable path is to wire into lifecycle hooks.
+
+## User Setup
+
+For release users and source builds, use the in-app installer:
+
+1. Open FocuSD Island.
+2. Expand the island and open Settings.
+3. In **AI Agent 状态灯**, click **安装/修复**.
+4. Restart Codex and any VSCode terminal running Claude Code.
+5. For Codex, review and trust the new hooks when Codex prompts you, or use `/hooks`.
+
+The installer writes the hook scripts to the current user's app data directory:
 
 ```text
 %APPDATA%\com.focusd.island\
 ```
 
-Do not use process or CPU detection for this integration. Codex and Claude Code can stay alive while idle, and Claude Code may run inside a VSCode terminal. The reliable path is to wire into lifecycle hooks.
+It then updates:
 
-This follows the same broad pattern used by projects such as [code-notify](https://github.com/mylee04/code-notify), [agent-notify](https://github.com/LetTTGACO/agent-notify), [esp32-claude-lamp](https://github.com/reynico/esp32-claude-lamp), and [CodexLight](https://github.com/StartHex/codex_agent_status_light): make hook handlers fast and let the display layer mirror status.
+```text
+%USERPROFILE%\.codex\config.toml
+%USERPROFILE%\.claude\settings.json
+```
 
-## Fast Status Path
+The operation is repeatable. Running **安装/修复** again rewrites FocuSD's managed hooks to the current app-data script path and removes older FocuSD hook entries that referenced development paths such as `D:\FocuSD\scripts`.
+
+## Runtime Contract
 
 Prompt submission uses a fast marker file instead of PowerShell JSON work:
 
@@ -23,106 +45,46 @@ FocuSD polls these marker files every 200ms. If either marker exists, the island
 
 When the turn finishes, `focusd-agent-status.ps1` removes the marker, writes `agent-status.json`, and keeps a short hold marker when the task completed too quickly. This makes very short prompts still visibly flash red for about 800ms.
 
-## Manual Smoke Test
-
-```powershell
-.\scripts\focusd-agent-running.cmd codex
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\focusd-agent-status.ps1 codex completed
-
-.\scripts\focusd-agent-running.cmd claudeCode
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\focusd-agent-status.ps1 claudeCode completed
-```
-
-## Codex Hooks
-
-Add these hooks to your Codex `config.toml`:
-
-```toml
-[[hooks.UserPromptSubmit]]
-[[hooks.UserPromptSubmit.hooks]]
-type = "command"
-command = 'cmd.exe /d /s /c ""D:\FocuSD\scripts\focusd-agent-running.cmd" codex"'
-command_windows = 'cmd.exe /d /s /c ""D:\FocuSD\scripts\focusd-agent-running.cmd" codex"'
-timeout = 1
-statusMessage = "Updating FocuSD agent status"
-
-[[hooks.Stop]]
-[[hooks.Stop.hooks]]
-type = "command"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File "D:\FocuSD\scripts\focusd-agent-status.ps1" codex completed'
-command_windows = 'powershell -NoProfile -ExecutionPolicy Bypass -File "D:\FocuSD\scripts\focusd-agent-status.ps1" codex completed'
-timeout = 5
-statusMessage = "Updating FocuSD agent status"
-```
-
-Codex requires new or changed hooks to be reviewed and trusted before they run. Restart Codex or open a new session, then use `/hooks` when prompted.
-
-## Claude Code Hooks
-
-Add these hooks to your Claude Code `settings.json`:
+`agent-status.json` uses this shape:
 
 ```json
 {
-  "hooks": {
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "cmd.exe",
-            "args": [
-              "/d",
-              "/s",
-              "/c",
-              "\"D:\\FocuSD\\scripts\\focusd-agent-running.cmd\" claudeCode"
-            ],
-            "timeout": 1
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "powershell.exe",
-            "args": [
-              "-NoProfile",
-              "-ExecutionPolicy",
-              "Bypass",
-              "-File",
-              "D:\\FocuSD\\scripts\\focusd-agent-status.ps1",
-              "claudeCode",
-              "completed"
-            ],
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "StopFailure": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "powershell.exe",
-            "args": [
-              "-NoProfile",
-              "-ExecutionPolicy",
-              "Bypass",
-              "-File",
-              "D:\\FocuSD\\scripts\\focusd-agent-status.ps1",
-              "claudeCode",
-              "failed"
-            ],
-            "timeout": 5
-          }
-        ]
-      }
-    ]
-  }
+  "codex": {
+    "phase": "running",
+    "taskId": "optional-id",
+    "updatedAt": 1783584000000
+  },
+  "claudeCode": {
+    "phase": "completed",
+    "taskId": "optional-id",
+    "updatedAt": 1783584000000
+  },
+  "updatedAt": 1783584000000
 }
 ```
 
-If you already have hooks in `settings.json`, merge the `UserPromptSubmit`, `Stop`, and `StopFailure` entries instead of replacing unrelated hooks. Restart the VSCode terminal running Claude Code after changing the file.
+Only `phase === "running"` turns the light red. Missing files, invalid JSON, missing fields, unknown phases, `idle`, `completed`, and `failed` are treated as safe green states.
+
+## Manual Smoke Test
+
+After using the in-app installer, run these commands with the app-data scripts:
+
+```powershell
+$dir = Join-Path $env:APPDATA 'com.focusd.island'
+& "$dir\focusd-agent-running.cmd" codex
+powershell -NoProfile -ExecutionPolicy Bypass -File "$dir\focusd-agent-status.ps1" codex completed
+
+& "$dir\focusd-agent-running.cmd" claudeCode
+powershell -NoProfile -ExecutionPolicy Bypass -File "$dir\focusd-agent-status.ps1" claudeCode completed
+```
+
+Expected behavior:
+
+- The island turns red after the `focusd-agent-running.cmd` command.
+- The island returns green after the `focusd-agent-status.ps1 ... completed` command.
+
+## Notes For Manual Configuration
+
+Manual configuration is usually unnecessary. Prefer the in-app installer because it uses the user's actual app-data path and handles Claude Code's Windows command behavior.
+
+If you do edit Claude Code hooks manually on Windows, prefer Claude Code's exec form: put `cmd.exe` or `powershell.exe` in `command` and pass every argument through `args`. This avoids shell-selection differences between VSCode, Git Bash, PowerShell, and `cmd.exe`.
