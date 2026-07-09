@@ -3,6 +3,7 @@ mod clipboard_history;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    os::windows::process::CommandExt,
     path::PathBuf,
     process::Command,
     sync::{Mutex, OnceLock},
@@ -48,6 +49,7 @@ const TUCKED_VISIBLE_EDGE_HEIGHT: f64 = 10.0;
 const STARTUP_REGISTRY_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 const STARTUP_REGISTRY_VALUE: &str = "FocuSD Island";
 const AUDIO_ACTIVE_THRESHOLD: f32 = 0.000015;
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 static WINDOW_STATE: OnceLock<Mutex<IslandWindowState>> = OnceLock::new();
 
@@ -153,6 +155,7 @@ fn set_island_interaction(
     app: AppHandle,
     mode: String,
     size_scale: f64,
+    margin_y: Option<f64>,
     expanded_height: Option<f64>,
     is_tucked: Option<bool>,
 ) -> Result<(), String> {
@@ -162,6 +165,9 @@ fn set_island_interaction(
         state.mode = mode;
         state.is_tucked = is_tucked.unwrap_or(false);
         state.size_scale = size_scale.clamp(0.75, 1.4);
+        if let Some(margin_y) = margin_y {
+            state.margin_y = margin_y.clamp(0.0, 160.0);
+        }
         if let Some(expanded_height) = expanded_height {
             state.expanded_height = expanded_height.clamp(
                 DEFAULT_EXPANDED_ISLAND_HEIGHT,
@@ -180,8 +186,15 @@ fn minimize_island(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn show_ready_island(app: AppHandle) -> Result<(), String> {
+    show_island(&app)
+}
+
+#[tauri::command]
 fn get_launch_at_startup() -> Result<bool, String> {
-    let status = Command::new("reg")
+    let mut command = Command::new("reg");
+    let status = command
+        .creation_flags(CREATE_NO_WINDOW)
         .args(["query", STARTUP_REGISTRY_KEY, "/v", STARTUP_REGISTRY_VALUE])
         .status()
         .map_err(|error| format!("Failed to query startup registry: {error}"))?;
@@ -196,7 +209,9 @@ fn set_launch_at_startup(enabled: bool) -> Result<(), String> {
             .map_err(|error| format!("Failed to resolve current executable: {error}"))?;
         let startup_value = format!("\"{}\"", current_exe.display());
 
-        Command::new("reg")
+        let mut command = Command::new("reg");
+        command
+            .creation_flags(CREATE_NO_WINDOW)
             .args([
                 "add",
                 STARTUP_REGISTRY_KEY,
@@ -210,7 +225,9 @@ fn set_launch_at_startup(enabled: bool) -> Result<(), String> {
             .arg("/f")
             .status()
     } else {
-        Command::new("reg")
+        let mut command = Command::new("reg");
+        command
+            .creation_flags(CREATE_NO_WINDOW)
             .args([
                 "delete",
                 STARTUP_REGISTRY_KEY,
@@ -611,15 +628,13 @@ pub fn run() {
                 }
                 start_cursor_passthrough_loop(window);
             }
-            if let Err(error) = show_island(app.handle()) {
-                eprintln!("failed to show island window: {error}");
-            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             set_island_layout,
             set_island_interaction,
             save_todo_markdown,
+            show_ready_island,
             minimize_island,
             get_launch_at_startup,
             set_launch_at_startup,

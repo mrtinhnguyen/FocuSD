@@ -2526,6 +2526,7 @@ function App() {
     useState(0);
   const clipboardShortcutToggleAt = useRef(0);
   const didCheckDate = useRef(false);
+  const didShowInitialWindow = useRef(false);
   const selectedArchive =
     archives.find((archive) => archive.date === selectedArchiveDate) ?? null;
   const visibleTodoRows = Math.min(
@@ -2652,6 +2653,7 @@ function App() {
         await invoke("set_island_interaction", {
           mode: nextMode,
           sizeScale: nextSettings.sizeScale,
+          marginY: nextSettings.marginY,
           expandedHeight: nextExpandedHeight,
           isTucked: nextIsTucked,
         });
@@ -2661,6 +2663,20 @@ function App() {
     },
     [],
   );
+
+  const showReadyIsland = useCallback(async () => {
+    if (didShowInitialWindow.current) {
+      return;
+    }
+
+    didShowInitialWindow.current = true;
+
+    try {
+      await invoke("show_ready_island");
+    } catch (error) {
+      console.error("Failed to show island", error);
+    }
+  }, []);
 
   const refreshClipboardHistory = useCallback(async () => {
     try {
@@ -3349,12 +3365,21 @@ function App() {
   }, [settings.marginY, scheduleNativeLayout]);
 
   useEffect(() => {
-    void syncNativeInteraction(mode, settings, expandedIslandHeight, isTucked);
+    void syncNativeInteraction(
+      mode,
+      settings,
+      expandedIslandHeight,
+      isTucked,
+    ).finally(() => {
+      void showReadyIsland();
+    });
   }, [
     expandedIslandHeight,
     isTucked,
     mode,
+    settings.marginY,
     settings.sizeScale,
+    showReadyIsland,
     syncNativeInteraction,
   ]);
 
